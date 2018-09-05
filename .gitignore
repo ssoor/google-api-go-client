@@ -10,3 +10,5 @@ clientsecret.dat
 *.out
 *.test
 *.exe
+debug
+.vscode/

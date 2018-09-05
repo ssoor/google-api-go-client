@@ -23,9 +23,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/template"
 	"unicode"
 
-	"google.golang.org/api/google-api-go-generator/internal/disco"
+	"github.com/ssoor/google-api-go-client/google-api-go-generator/internal/disco"
+	tmpl "github.com/ssoor/google-api-go-client/google-api-go-generator/internal/template"
 )
 
 const (
@@ -511,6 +513,65 @@ func (a *API) WriteGeneratedCode() error {
 
 var docsLink string
 
+func asComment2(pfx, c string) string {
+	var buf bytes.Buffer
+	const maxLen = 70
+	r := strings.NewReplacer(
+		"\n", "\n"+pfx+"// ",
+		"`\"", `"`,
+		"\"`", `"`,
+	)
+	for len(c) > 0 {
+		line := c
+		if len(line) < maxLen {
+			fmt.Fprintf(&buf, "%s// %s", pfx, r.Replace(line))
+			break
+		}
+		// Don't break URLs.
+		if !urlRE.MatchString(line[:maxLen]) {
+			line = line[:maxLen]
+		}
+		si := strings.LastIndex(line, " ")
+		if nl := strings.Index(line, "\n"); nl != -1 && nl < si {
+			si = nl
+		}
+		if si != -1 {
+			line = line[:si]
+		}
+		fmt.Fprintf(&buf, "%s// %s", pfx, r.Replace(line))
+		c = c[len(line):]
+		if si != -1 {
+			c = c[1:]
+		}
+	}
+	return buf.String()
+}
+
+func (a *API) executeTmpl(tmpl string, wr io.Writer, data interface{}) error {
+	fn := template.FuncMap{
+		"title": strings.Title,
+		"package": func(name string, version string) string {
+			return fmt.Sprintf("%s/%s/%s", *apiPackageBase, name, renameVersion(version))
+		},
+		"base_url": func() string {
+			return a.apiBaseURL()
+		},
+		"asComment":              asComment2,
+		"scopeIdentifierFromURL": scopeIdentifierFromURL,
+		"service_type":           func() string { return a.ServiceType() },
+		"resourceGoType":         resourceGoType,
+		"resourceGoField":        resourceGoField,
+		"initialCap":             initialCap,
+	}
+
+	t, err := template.New("f").Funcs(fn).Parse(tmpl)
+	if err != nil {
+		return err
+	}
+
+	return t.Execute(wr, data)
+}
+
 func (a *API) GenerateCode() ([]byte, error) {
 	pkg := a.Package()
 
@@ -545,79 +606,79 @@ func (a *API) GenerateCode() ([]byte, error) {
 		return err
 	}
 
-	p, pn := a.p, a.pn
+	// pn := a.pn
 
 	if *headerPath != "" {
 		if err := wf(*headerPath); err != nil {
 			return nil, err
 		}
 	}
-
-	pn("// Package %s provides access to the %s.", pkg, a.doc.Title)
-	if r := replacementPackage[pkg]; r != "" {
-		pn("//")
-		pn("// This package is DEPRECATED. Use package %s instead.", r)
+	type ImportPackage struct {
+		Package string
+		Alias   string
 	}
-	docsLink = a.doc.DocumentationLink
-	if docsLink != "" {
-		pn("//")
-		pn("// See %s", docsLink)
-	}
-	pn("//\n// Usage example:")
-	pn("//")
-	pn("//   import %q", a.Target())
-	pn("//   ...")
-	pn("//   %sService, err := %s.New(oauthHttpClient)", pkg, pkg)
 
-	pn("package %s // import %q", pkg, a.Target())
-	p("\n")
-	pn("import (")
-	for _, imp := range []struct {
-		pkg   string
-		lname string
+	// A Scope is an OAuth2 scope.
+	type Scope struct {
+		URL         string
+		Description string
+	}
+
+	// Auth represents the auth section of a discovery document.
+	// Only OAuth2 information is retained.
+	type Auth struct {
+		OAuth2Scopes []Scope
+	}
+	doc := struct {
+		ID                 string                   `json:"id"`
+		Name               string                   `json:"name"`
+		Version            string                   `json:"version"`
+		Title              string                   `json:"title"`
+		Auth               disco.Auth               `json:"auth"`
+		RootURL            string                   `json:"rootUrl"`
+		ServicePath        string                   `json:"servicePath"`
+		BasePath           string                   `json:"basePath"`
+		DocumentationLink  string                   `json:"documentationLink"`
+		ImportPackage      []ImportPackage          `json:"importPackage"`
+		Resources          disco.ResourceList       `json:"resources"`
+		Schemas            map[string]*disco.Schema `json:"schemas"`
+		ReplacementPackage string                   `json:"peplacementPackage"`
 	}{
-		{"bytes", ""},
-		{"encoding/json", ""},
-		{"errors", ""},
-		{"fmt", ""},
-		{"io", ""},
-		{"net/http", ""},
-		{"net/url", ""},
-		{"strconv", ""},
-		{"strings", ""},
-		{*contextHTTPPkg, "ctxhttp"},
-		{*contextPkg, "context"},
-		{*gensupportPkg, "gensupport"},
-		{*googleapiPkg, "googleapi"},
-	} {
-		if imp.lname == "" {
-			pn("  %q", imp.pkg)
-		} else {
-			pn("  %s %q", imp.lname, imp.pkg)
-		}
+		ID:                 a.doc.ID,
+		Name:               a.doc.Name,
+		Title:              a.doc.Title,
+		Version:            a.doc.Version,
+		Auth:               a.doc.Auth,
+		Schemas:            a.doc.Schemas,
+		Resources:          a.doc.Resources,
+		DocumentationLink:  a.doc.DocumentationLink,
+		ReplacementPackage: "xxxxx/ttttt",
+		ImportPackage: []ImportPackage{
+			{"bytes", ""},
+			{"encoding/json", ""},
+			{"errors", ""},
+			{"fmt", ""},
+			{"io", ""},
+			{"net/http", ""},
+			{"net/url", ""},
+			{"strconv", ""},
+			{"strings", ""},
+			{*contextHTTPPkg, "ctxhttp"},
+			{*contextPkg, "context"},
+			{*gensupportPkg, "gensupport"},
+			{*googleapiPkg, "googleapi"},
+		},
 	}
-	pn(")")
-	pn("\n// Always reference these packages, just in case the auto-generated code")
-	pn("// below doesn't.")
-	pn("var _ = bytes.NewBuffer")
-	pn("var _ = strconv.Itoa")
-	pn("var _ = fmt.Sprintf")
-	pn("var _ = json.NewDecoder")
-	pn("var _ = io.Copy")
-	pn("var _ = url.Parse")
-	pn("var _ = gensupport.MarshalJSON")
-	pn("var _ = googleapi.Version")
-	pn("var _ = errors.New")
-	pn("var _ = strings.Replace")
-	pn("var _ = context.Canceled")
-	pn("var _ = ctxhttp.Do")
-	pn("")
-	pn("const apiId = %q", a.doc.ID)
-	pn("const apiName = %q", a.doc.Name)
-	pn("const apiVersion = %q", a.doc.Version)
-	pn("const basePath = %q", a.apiBaseURL())
 
-	a.generateScopeConstants()
+	if r := replacementPackage[pkg]; r != "" {
+		doc.ReplacementPackage = r
+	}
+
+	if err := a.executeTmpl(tmpl.Gen, &buf, doc); nil != err {
+		return nil, err
+	}
+
+	// a.generateScopeConstants()
 	a.PopulateSchemas()
 
 	service := a.ServiceType()
@@ -626,32 +687,14 @@ func (a *API) GenerateCode() ([]byte, error) {
 	a.GetName("New")
 	a.GetName(service)
 
-	pn("func New(client *http.Client) (*%s, error) {", service)
-	pn("if client == nil { return nil, errors.New(\"client is nil\") }")
-	pn("s := &%s{client: client, BasePath: basePath}", service)
-	for _, res := range a.doc.Resources { // add top level resources.
-		pn("s.%s = New%s(s)", resourceGoField(res, nil), resourceGoType(res))
-	}
-	pn("return s, nil")
-	pn("}")
+	// pn("\nfunc (s *%s) userAgent() string {", service)
+	// pn(` if s.UserAgent == "" { return googleapi.UserAgent }`)
+	// pn(` return googleapi.UserAgent + " " + s.UserAgent`)
+	// pn("}\n")
 
-	pn("\ntype %s struct {", service)
-	pn(" client *http.Client")
-	pn(" BasePath string // API endpoint base URL")
-	pn(" UserAgent string // optional additional User-Agent fragment")
-
-	for _, res := range a.doc.Resources {
-		pn("\n\t%s\t*%s", resourceGoField(res, nil), resourceGoType(res))
-	}
-	pn("}")
-	pn("\nfunc (s *%s) userAgent() string {", service)
-	pn(` if s.UserAgent == "" { return googleapi.UserAgent }`)
-	pn(` return googleapi.UserAgent + " " + s.UserAgent`)
-	pn("}\n")
-
-	for _, res := range a.doc.Resources {
-		a.generateResource(res)
-	}
+	// for _, res := range a.doc.Resources {
+	// 	a.generateResource(res)
+	// }
 
 	a.responseTypes = make(map[string]bool)
 	for _, meth := range a.APIMethods() {
@@ -663,6 +706,7 @@ func (a *API) GenerateCode() ([]byte, error) {
 
 	for _, name := range a.sortedSchemaNames() {
 		a.schemas[name].writeSchemaCode(a)
+
 	}
 
 	for _, meth := range a.APIMethods() {
@@ -677,6 +721,7 @@ func (a *API) GenerateCode() ([]byte, error) {
 	if err != nil {
 		return buf.Bytes(), err
 	}
+
 	return clean, nil
 }
 
